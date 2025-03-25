@@ -2,29 +2,32 @@
 
 from hf import HuggingFaceChat
 from llmcache import LLMCache
+import numpy as np
 
 class Core:
-    def __init__(self, llm_obj, cache, similarity_threshold=0.8):
+    def __init__(self, llm_obj, cache, top_k=3, similarity_threshold=0.8):
         self.llm_obj = llm_obj
         self.cache = cache
+        self.top_k = top_k
         self.similarity_threshold = similarity_threshold
     
     def get_response(self, query):
+
+        # similarity matching here with llm cache
+        cache_response = self.cache.search_cache(query,
+                                                 top_k=self.top_k,
+                                                 similarity_threshold=self.similarity_threshold)
         
-        # will do similarity matching here with llm cache
-        cache_response = self.cache.search_cache(query, similarity_threshold=self.similarity_threshold)
         if cache_response:
-            # TODO: post process the cache response --> its returning a dictionary with the response
-            # print("Cache hit, returning cached response") # this should go in logging ideally
-            # check if the response is valid
-            return cache_response
+            # print("Cache hit, returning cached response") # TODO: this should go in logging ideally
+            return cache_response 
         else:
-            # print("Cache miss, getting response from LLM") # this should go in logging ideally
+            # print("Cache miss, getting response from LLM") # TODO: this should go in logging ideally
             try:
                 response = self.get_response_from_llm(query)
             except (IndexError, KeyError, TypeError) as e:
-                print("Bot: An error occurred while processing the response from LLM")
-                print(f"Error details: {e}")                
+                print("Bot: An error occurred while processing the response from LLM") # TODO: this should go in logging ideally
+                print(f"Error details: {e}") # TODO: this should go in logging ideally                 
             # store the response in the cache
             # Check if the response is valid
             valid_response = (
