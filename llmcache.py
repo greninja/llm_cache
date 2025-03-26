@@ -1,142 +1,182 @@
 from venv import create
-from embedding_generator import SentenceTransformer
+from typing import Optional, List, Dict, Any
 import uuid
 import time
 import numpy as np
-
 from redis import Redis
-from redis.commands.search.field import TagField, TextField, NumericField, VectorField
+from redis.commands.search.field import VectorField
 from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
-
-from redis_om import get_redis_connection, HashModel, Field
-
+from redis.exceptions import ResponseError
+from redis_om import get_redis_connection
+from embedding_generator import SentenceTransformer
 from cohere_rerank import CohereRerank
 
-# class LLMCacheEntry(HashModel):
-#     question: str = Field(index=True)  # Original question
-#     response: str  # Cached response
-#     timestamp: int = Field(index=True)  # Timestamp for TTL policies
-
-#     class Meta:
-#         database = redis_conn
-#         model_key = "llm_cache"
-
 class LLMCache:
-    def __init__(self,
-                 redis_conn: Redis = None,
-                 embedding_dimension: int = 384,
-                 embedding_generator = None,
-                 ttl: int = 3600,
-                 policy: str = "allkeys-lru",
-                 maxmemory: int = 1000000000,
-                 maxmemory_samples: int = 10,
-                 do_rerank: bool = False): 
-        if redis_conn is None:
-            self.redis_conn = get_redis_connection( 
-                host="localhost", port=6379, decode_responses=True
-            )
-        else:
-            self.redis_conn = redis_conn
-        self.ttl = ttl # have to add eviction logic
-        self.initialize_eviction_params(policy, maxmemory, maxmemory_samples)
+    """A cache system for LLM responses using Redis vector similarity search."""
+    
+    CACHE_INDEX_NAME = "llm_cache_idx"
+    CACHE_PREFIX = "llm_cache:"
+    
+    def __init__(
+        self,
+        redis_conn: Optional[Redis] = None,
+        embedding_dimension: int = 384,
+        embedding_generator: Optional[Any] = None,
+        ttl_seconds: int = 3600,
+        eviction_policy: str = "allkeys-lru",
+        max_memory_bytes: int = 1_000_000_000,
+        max_memory_samples: int = 10,
+        enable_rerank: bool = False
+    ):
+        """
+        Initialize the LLM cache with Redis connection and configuration.
+        
+        Args:
+            redis_conn: Redis connection object. If None, creates a local connection
+            embedding_dimension: Dimension of the embedding vectors
+            embedding_generator: Custom embedding generator. If None, uses SentenceTransformer
+            ttl_seconds: Time-to-live for cache entries in seconds
+            eviction_policy: Redis eviction policy
+            max_memory_bytes: Maximum memory limit for Redis in bytes
+            max_memory_samples: Number of samples for Redis LRU algorithm
+            enable_rerank: Whether to use Cohere's reranking
+        """
+        self.redis_conn = redis_conn or get_redis_connection(
+            host="localhost", port=6379, decode_responses=True
+        )
+        self.ttl_seconds = ttl_seconds
         self.embedding_dimension = embedding_dimension
-        self.embedding_generator = embedding_generator if embedding_generator is not None else SentenceTransformer()
-        self.do_rerank = do_rerank
-        self.create_index()
+        self.embedding_generator = embedding_generator or SentenceTransformer()
+        self.enable_rerank = enable_rerank
         
-        if self.do_rerank:
-            import os
-            co_api_key = os.getenv("COHERE_API_KEY")
-            self.rerank_evaluation = CohereRerank(model="rerank-multilingual-v3.0", api_key=co_api_key)
+        self._configure_redis(eviction_policy, max_memory_bytes, max_memory_samples)
+        self._initialize_search_index()
         
-    def initialize_eviction_params(self, policy, maxmemory, maxmemory_samples):
-        if maxmemory:
-            self.redis_conn.config_set("maxmemory", maxmemory)
+        if self.enable_rerank:
+            self._initialize_reranker()
+
+    def _configure_redis(self, policy: str, max_memory: int, sample_size: int) -> None:
+        """Configure Redis memory and eviction settings."""
+        if max_memory:
+            self.redis_conn.config_set("maxmemory", max_memory)
         if policy:
             self.redis_conn.config_set("maxmemory-policy", policy)
-        if maxmemory_samples:
-            self.redis_conn.config_set("maxmemory-samples", maxmemory_samples)
+        if sample_size:
+            self.redis_conn.config_set("maxmemory-samples", sample_size)
 
-    def create_index(self):
+    def _initialize_search_index(self) -> None:
+        """Initialize the Redis search index for vector similarity search."""
         try:
-            self.redis_conn.ft("llm_cache_idx").info()  # Check if index exists
-            print("Index already exists!")  # TODO: this should go in logging ideally
-        except:
+            self.redis_conn.ft(self.CACHE_INDEX_NAME).info()
+        except ResponseError:
             schema = (
                 VectorField("embedding", "HNSW", {
                     "TYPE": "FLOAT32",
-                    "DIM": 384,  # Adjust to match your embedding model
+                    "DIM": self.embedding_dimension,
                     "DISTANCE_METRIC": "COSINE"
                 })
             )
-            self.redis_conn.ft("llm_cache_idx").create_index(
+            self.redis_conn.ft(self.CACHE_INDEX_NAME).create_index(
                 schema,
-                definition=IndexDefinition(prefix=["llm_cache:"], index_type=IndexType.HASH)
+                definition=IndexDefinition(
+                    prefix=[self.CACHE_PREFIX],
+                    index_type=IndexType.HASH
+                )
             )
 
-    def store_query_response(self, question, response):
-        # Generate an embedding
-        embedding = self.embedding_generator.generate_embedding(question)  # Generate vector embedding for question
-        embedding = np.array(embedding, dtype=np.float32).tobytes()
+    def _initialize_reranker(self) -> None:
+        """Initialize the Cohere reranking system."""
+        import os
+        cohere_api_key = os.getenv("COHERE_API_KEY")
+        if not cohere_api_key:
+            raise ValueError("COHERE_API_KEY environment variable is required for reranking")
+        self.reranker = CohereRerank(
+            model="rerank-multilingual-v3.0",
+            api_key=cohere_api_key
+        )
 
-        # Generate a unique primary key
-        pk = f"llm_cache:{uuid.uuid4().hex}"
-
-        # Store data in Redis as a Hash
-        self.redis_conn.hset(pk, mapping={
-            "embedding": embedding,
+    def store_query_response(self, question: str, response: str) -> str:
+        """
+        Store a question-response pair in the cache.
+        
+        Args:
+            question: The original question
+            response: The LLM's response
+            
+        Returns:
+            str: The cache entry key
+        """
+        embedding = self.embedding_generator.generate_embedding(question)
+        embedding_bytes = np.array(embedding, dtype=np.float32).tobytes()
+        
+        cache_key = f"{self.CACHE_PREFIX}{uuid.uuid4().hex}"
+        cache_entry = {
+            "embedding": embedding_bytes,
             "question": question,
             "response": response,
             "timestamp": int(time.time())
-        })
+        }
+        
+        self.redis_conn.hset(cache_key, mapping=cache_entry)
+        return cache_key
 
-        # print(f"Stored entry with key: {pk}") --> this should go in logging ideally
-        return pk
+    def search_cache(
+        self,
+        query_text: str,
+        top_k: int = 3,
+        similarity_threshold: float = 0.8
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Search the cache for similar questions and their responses.
+        
+        Args:
+            query_text: The question to search for
+            top_k: Number of similar entries to retrieve
+            similarity_threshold: Minimum similarity score threshold
+            
+        Returns:
+            Optional[Dict]: The best matching cache entry or None
+        """
+        query_vector = np.array(
+            self.embedding_generator.generate_embedding(query_text),
+            dtype=np.float32
+        )
+        
+        search_results = self._vector_search(query_vector, top_k)
+        if not search_results:
+            return None
+            
+        return self.post_process_cache_matches(
+            query_text,
+            search_results,
+            similarity_threshold
+        )
 
-    def search_cache(self, query_text: str, top_k: int = 3, similarity_threshold=0.8):
-
-        # generate embedding for the query
-        query_vector = np.array(self.embedding_generator.generate_embedding(query_text), dtype=np.float32)
-
+    def _vector_search(self, query_vector: np.ndarray, top_k: int) -> List[Any]:
+        """Perform vector similarity search in Redis."""
         query = (
-            Query("*=>[KNN {} @embedding $query_vec AS score]".format(top_k))
+            Query(f"*=>[KNN {top_k} @embedding $query_vec AS score]")
             .sort_by("score")
             .return_fields("question", "response", "timestamp", "score")
             .paging(0, top_k)
             .dialect(2)
         )
-
-        # uses vector search to find top k matches based on embedding similarity
-        cache_matches = self.redis_conn.ft("llm_cache_idx").search(
-            query, query_params={"query_vec": query_vector.tobytes()}
-        ).docs
-
-        if not cache_matches:
-            return None
         
-        # further filtering/post processing
-        # 1st filterting step: only consider matches with similarity score > threshold
-        # 2nd filtering step: only consider matches with relevance score higher than a threshold
-        # of matched results's answers with query text
-        best_match = self.post_process_cache_matches(query_text, cache_matches, similarity_threshold)
-            
-        # # Return all matches with their scores for post-processing
-        # cache_matches = []
-        # for match in cache_matches:
-        #     similarity_score = float(match.score)
-        #     cache_matches.append({
-        #         "question": match.question,
-        #         "response": match.response,
-        #         "timestamp": match.timestamp,
-        #         "similarity_score": similarity_score
-        #     })
-        
-        return best_match
+        results = self.redis_conn.ft(self.CACHE_INDEX_NAME).search(
+            query,
+            query_params={"query_vec": query_vector.tobytes()}
+        )
+        return results.docs
 
-    def post_process_cache_matches(self, query_text: str, cache_matches, similarity_threshold=0.8):
+    def post_process_cache_matches(
+        self,
+        query_text: str,
+        cache_matches: List[Any],
+        similarity_threshold: float
+    ) -> Optional[Dict[str, Any]]:
         """
-        Post-process cache matches with additional similarity checks
+        Post-process and filter cache matches based on similarity scores.
         
         Args:
             query_text: Original query text
@@ -144,17 +184,10 @@ class LLMCache:
             similarity_threshold: Minimum similarity score required
             
         Returns:
-            Best matching cache entry or None if no good matches found
+            Optional[Dict]: Best matching cache entry or None
         """
-        # Additional similarity checks can be implemented here
-        # For example, you could:
-        # 1. Compare exact text matches
-        # 2. Apply different similarity metrics
-        # 3. Check for keyword overlap
-        # 4. Apply business logic filters
-
-        # For cosine distance in Redis, LOWER scores mean MORE similar
-        # So we want scores LESS THAN (1 - similarity_threshold)
+        # Convert similarity threshold to cosine distance threshold
+        # (Redis uses cosine distance where lower scores mean higher similarity)
         cosine_distance_threshold = 1 - similarity_threshold
         
         valid_matches = [
@@ -162,17 +195,39 @@ class LLMCache:
             if float(match.score) < cosine_distance_threshold
         ]
 
-        if valid_matches:
-            if self.do_rerank:
-                # rerank the valid matches
-                src_dict = {"question": query_text}
-                cache_dict = {"answers": [match.response for match in valid_matches]}
-                reranked_matches = self.rerank_evaluation.evaluation(src_dict, cache_dict, top_n=1)
-                if reranked_matches is not None:
-                    index = reranked_matches[0]["index"]
-                    return valid_matches[index]
-                else:
-                    return valid_matches[0]
-            else:
-                return valid_matches[0]
-        return None
+        if not valid_matches:
+            return None
+
+        if self.enable_rerank:
+            return self._rerank_matches(query_text, valid_matches)
+        
+        return self._convert_match_to_dict(valid_matches[0])
+
+    def _rerank_matches(self, query_text: str, matches: List[Any]) -> Optional[Dict[str, Any]]:
+        """Rerank matches using Cohere's reranking system."""
+        rerank_input = {
+            "question": query_text,
+            "answers": [match.response for match in matches]
+        }
+        
+        reranked_results = self.reranker.evaluation(
+            rerank_input,
+            {"answers": rerank_input["answers"]},
+            top_n=1
+        )
+        
+        if reranked_results:
+            best_match_index = reranked_results[0].index
+            return self._convert_match_to_dict(matches[best_match_index])
+        
+        return self._convert_match_to_dict(matches[0])
+
+    @staticmethod
+    def _convert_match_to_dict(match: Any) -> Dict[str, Any]:
+        """Convert a Redis search result to a dictionary."""
+        return {
+            "question": match.question,
+            "response": match.response,
+            "timestamp": int(match.timestamp),
+            "similarity_score": float(match.score)
+        }
