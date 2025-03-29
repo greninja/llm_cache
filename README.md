@@ -123,4 +123,4 @@ This project is licensed under the MIT License © 2025 Shadab Shaikh.
 
 ## Acknowledgments
 
-Much of my implementation was inspired by Zilliz's [GPTCache](https://github.com/zilliz/GPTCache). This project grew out of my curiosity to understand the systems that enable fast LLM inference, thereby significantly reducing latency and costs.
+Much of my implementation was inspired by Zilliz's [GPTCache](https://github.com/zilliz/GPTCache). My motivation for building LLMCache stemmed from a deep curiosity to explore and understand the various system components that power fast LLM inference, with the goal of meaningfully reducing latency and costs.
