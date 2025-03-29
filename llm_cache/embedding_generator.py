@@ -33,8 +33,7 @@ class SentenceTransformer:
         try:
             self.model = sentence_transformers.SentenceTransformer(self.model_name)
             self.use_sentence_transformer = True
-            
-        except Exception as e:
+        except Exception:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self.model = AutoModel.from_pretrained(self.model_name)
             self.use_sentence_transformer = False

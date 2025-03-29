@@ -9,8 +9,9 @@ from redis.commands.search.indexDefinition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 from redis.exceptions import ResponseError
 from redis_om import get_redis_connection
-from embedding_generator import SentenceTransformer
-from cohere_rerank import CohereRerank
+
+from llm_cache.embedding_generator import SentenceTransformer
+from llm_cache.cohere_rerank import CohereRerank
 
 class LLMCache:
     """A cache system for LLM responses using Redis vector similarity search."""

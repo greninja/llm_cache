@@ -1,7 +1,8 @@
 from typing import Optional, Any, Dict
 import logging
-from hf import HuggingFaceChat
-from llmcache import LLMCache
+
+from llm_cache.hf import HuggingFaceChat
+from llm_cache.llmcache import LLMCache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

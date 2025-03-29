@@ -1,0 +1,8 @@
+cohere==5.14.0
+numpy==2.2.4
+redis==5.2.1
+redis_om==0.3.3
+Requests==2.32.3
+sentence_transformers==3.4.1
+torch==2.6.0
+transformers==4.49.0
