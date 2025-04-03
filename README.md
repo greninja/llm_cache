@@ -124,3 +124,9 @@ This project is licensed under the MIT License © 2025 Shadab Shaikh.
 ## Acknowledgments
 
 Much of my implementation was inspired by Zilliz's [GPTCache](https://github.com/zilliztech/GPTCache). My motivation for building LLMCache stemmed from a deep curiosity to explore and understand the various system components that power fast LLM inference, with the goal of meaningfully reducing latency and costs.
+
+## Disclaimer
+
+This project is a work-in-progress and is intended for educational and research purposes only. While it may serve as a helpful starting point or reference, it is not optimized or tested for production-grade use.
+
+There are more robust and battle-tested LLM caching systems available (Zilliz's GPTCache for instance).
